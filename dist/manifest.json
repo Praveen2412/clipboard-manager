@@ -23,8 +23,7 @@
     "contextMenus",
     "scripting",
     "system.display",
-    "activeTab",
-    "alarms"
+    "activeTab"
   ],
   "background": {
     "service_worker": "background.js"
@@ -37,7 +36,7 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_idle"
     }
   ]
 }

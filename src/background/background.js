@@ -4,8 +4,7 @@
  */
 
 // Constants
-const CLIPBOARD_CHECK_INTERVAL = 1000; // 1 second (more frequent checks)
-const DEFAULT_MAX_TEXT_LENGTH = 10000; // Default maximum text length
+const CLIPBOARD_CHECK_INTERVAL = 1000; // 2 seconds
 
 // State variables
 let clipboardData = {
@@ -30,113 +29,6 @@ let maxImageSize = 1000; // in KB
 let showCharCount = true;
 
 /**
- * Log verbose messages (only if enabled)
- * @param {...any} args - Arguments to log
- */
-const logVerbose = (...args) => {
-  if (verboseLogging) {
-    console.log('[Clipboard Manager]', ...args);
-  }
-};
-
-/**
- * Generate a unique ID
- * @returns {string} - Unique ID
- */
-const generateId = () => {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2);
-};
-
-/**
- * Check if a URL is restricted (extension can't run on it)
- * @param {string} url - URL to check
- * @returns {boolean} - True if restricted
- */
-const isRestrictedUrl = (url) => {
-  if (!url) return true;
-  
-  const restrictedProtocols = [
-    'chrome:', 'chrome-extension:', 'chrome-search:',
-    'edge:', 'devtools:', 'about:', 'data:',
-    'file:', 'view-source:'
-  ];
-  
-  try {
-    const urlObj = new URL(url);
-    return restrictedProtocols.some(protocol => urlObj.protocol.startsWith(protocol));
-  } catch (error) {
-    return true;
-  }
-};
-
-// Window close listener
-const windowCloseListener = (windowId) => {
-  if (windowId === floatingWindowId) {
-    floatingWindowId = null;
-    chrome.windows.onRemoved.removeListener(windowCloseListener);
-  }
-};
-
-// Auto-start the extension when installed or browser starts
-chrome.runtime.onStartup.addListener(() => {
-  console.log('Browser started - initializing clipboard manager');
-  
-  // Add a slight delay to ensure the browser is fully initialized
-  setTimeout(() => {
-    initialize().catch(error => {
-      console.error('Error during startup initialization:', error);
-      // Try again after a delay
-      setTimeout(initialize, 5000);
-    });
-  }, 1000);
-});
-
-// Also initialize when installed
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('Extension installed or updated - initializing clipboard manager');
-  
-  // Create an alarm that will wake up the background script periodically
-  chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
-  
-  // Also create a more frequent alarm for monitoring during development/debugging
-  chrome.alarms.create('monitorCheck', { periodInMinutes: 0.5 });
-  
-  // Initialize after a short delay to ensure all browser systems are ready
-  setTimeout(() => {
-    initialize().catch(error => {
-      console.error('Error during installation initialization:', error);
-      // Try again after a delay
-      setTimeout(initialize, 5000);
-    });
-  }, 1000);
-});
-
-// Handle alarms to keep the service worker alive
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'keepAlive' || alarm.name === 'monitorCheck') {
-    console.log(`${alarm.name} alarm triggered - ensuring clipboard monitoring is active`);
-    if (!checkInterval) {
-      console.log('Clipboard monitoring was not running - restarting...');
-      startClipboardMonitoring();
-    } else {
-      console.log('Clipboard monitoring is active, interval ID:', checkInterval);
-    }
-    
-    // Update lastAliveTime
-    const lastAliveTime = Date.now();
-    chrome.storage.local.set({ lastAliveTime });
-    
-    // Occasionally check for images specifically on the monitorCheck alarm
-    if (alarm.name === 'monitorCheck') {
-      console.log('Running periodic direct image check');
-      checkForImageData().catch(error => {
-        console.warn('Periodic image check failed:', error);
-      });
-    }
-  }
-});
-
-/**
  * Initialize background script
  */
 const initialize = async () => {
@@ -156,10 +48,13 @@ const initialize = async () => {
     // Load clipboard data from storage
     await loadClipboardData();
     
-    // Start clipboard monitoring - ensure it's always running
+    // Make sure we're not already monitoring (avoid duplicate intervals)
     if (checkInterval) {
       clearInterval(checkInterval);
+      checkInterval = null;
     }
+    
+    // Start clipboard monitoring
     startClipboardMonitoring();
     
     // Setup context menus
@@ -169,28 +64,6 @@ const initialize = async () => {
     chrome.action.onClicked.addListener(() => {
       chrome.tabs.create({ url: 'index.html' });
     });
-    
-    // Explicitly check for clipboard content on startup
-    setTimeout(() => {
-      console.log('Performing initial clipboard check');
-      checkClipboardForChanges(true); // Force check
-    }, 2000);
-    
-    // Do an additional image check with delay to ensure the browser is ready
-    setTimeout(() => {
-      console.log('Performing initial image check');
-      checkForImageData().catch(error => {
-        console.warn('Initial image check failed:', error);
-      });
-    }, 3000);
-    
-    // Restart monitoring if it stops for any reason
-    setInterval(() => {
-      if (!checkInterval) {
-        console.log('Clipboard monitoring was not running - restarting...');
-        startClipboardMonitoring();
-      }
-    }, 60000); // Check every minute
     
     // Add a diagnostics check to verify clipboard monitoring
     setTimeout(() => {
@@ -224,8 +97,8 @@ const initialize = async () => {
     return true;
   } catch (error) {
     console.error('Error initializing background script:', error);
-    // Attempt to restart on error
-    setTimeout(initialize, 10000);
+    // Attempt recovery
+    startClipboardMonitoring();
     return false;
   }
 };
@@ -238,10 +111,12 @@ const startClipboardMonitoring = () => {
     clearInterval(checkInterval);
   }
   checkInterval = setInterval(checkClipboardForChanges, CLIPBOARD_CHECK_INTERVAL);
-  logVerbose('Clipboard monitoring started with interval:', CLIPBOARD_CHECK_INTERVAL);
+  logVerbose('Clipboard monitoring started');
   
-  // Force an immediate check
-  setTimeout(checkClipboardForChanges, 100);
+  // Perform an initial check to start capturing immediately
+  setTimeout(() => {
+    checkClipboardForChanges(true);
+  }, 100);
 };
 
 /**
@@ -278,34 +153,18 @@ const handleCopyKeyDetected = (hasSelection, timestamp = Date.now()) => {
  * @param {boolean} force - Force check even if there's selection
  */
 const checkClipboardForChanges = async (force = false) => {
-  if (isProcessingClipboard) {
-    // If it's been processing for more than 10 seconds, reset the flag
-    if (isProcessingClipboard && (Date.now() - isProcessingClipboard) > 10000) {
-      console.warn('Clipboard processing took too long, resetting flag');
-      isProcessingClipboard = false;
-    } else {
-      return;
-    }
-  }
+  if (isProcessingClipboard) return;
 
   try {
-    // Set a timestamp when we started processing
-    isProcessingClipboard = Date.now();
+    isProcessingClipboard = true;
     logVerbose('Checking clipboard for changes, force =', force);
 
     // Get active tab
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs || tabs.length === 0) {
-      logVerbose('No active tab found, trying again with all windows');
-      // Try to find any active tab in any window
-      const allTabs = await chrome.tabs.query({ active: true });
-      if (!allTabs || allTabs.length === 0) {
-        logVerbose('No active tab found in any window, skipping clipboard check');
-        isProcessingClipboard = false;
-        return;
-      }
-      // Use the first active tab found
-      tabs[0] = allTabs[0];
+      logVerbose('No active tab found, skipping clipboard check');
+      isProcessingClipboard = false;
+      return;
     }
 
     const activeTab = tabs[0];
@@ -319,19 +178,6 @@ const checkClipboardForChanges = async (force = false) => {
     
     logVerbose('Reading clipboard from tab:', activeTab.title);
     
-    // Check for image content first - often more reliable
-    try {
-      const imageResult = await checkForImageData();
-      if (imageResult && imageResult.imageDetected) {
-        console.log('Image detected and processed');
-        isProcessingClipboard = false;
-        return;
-      }
-    } catch (imageError) {
-      console.warn('Error checking for image data:', imageError);
-    }
-    
-    // Then check for text content
     try {
       // Execute the content script to read clipboard data with enhanced error handling
       const clipboardResults = await chrome.scripting.executeScript({
@@ -356,71 +202,286 @@ const checkClipboardForChanges = async (force = false) => {
                 error: null
               };
               
-              // Always try to read the clipboard regardless of selection state
-              // to improve reliability
-              try {
-                // Use the Clipboard API
-                const text = window.navigator.clipboard.readText().then(text => {
-                  if (text && text.length > 0) {
-                    console.log('[Clipboard Manager] Text found in clipboard via API');
-                    return text;
-                  }
-                  return null;
-                }).catch(e => {
-                  console.warn('[Clipboard Manager] Clipboard API access failed:', e);
-                  return null;
-                });
+              // Check if there's clipboard manager state exposed by the content script
+              const cmState = window.getClipboardManagerState ? window.getClipboardManagerState() : null;
+              
+              if (cmState && (cmState.justCopied || cmState.copyKeyPressed || cmState.pasteKeyPressed)) {
+                console.log('[Clipboard Manager] Reading clipboard immediately after copy/paste event');
+                // Always proceed if copy or paste was detected
+              } else {
+                // First check if user is actively typing in an input field
+                const activeElement = document.activeElement;
+                const isUserTyping = activeElement && 
+                                    (activeElement.tagName === 'INPUT' || 
+                                     activeElement.tagName === 'TEXTAREA' || 
+                                     activeElement.isContentEditable) &&
+                                    document.hasFocus() && 
+                                    (activeElement === document.querySelector(':focus'));
+                                    
+                if (isUserTyping && !forceCheck) {
+                  console.log('[Clipboard Manager] Skipping clipboard read - user is typing');
+                  safeResponse.skipReason = 'user_typing';
+                  return safeResponse;
+                }
                 
-                return text;
-              } catch (e) {
-                safeResponse.error = 'Clipboard API error: ' + e.message;
-                console.warn('[Clipboard Manager] Error reading clipboard:', e);
+                // Check for active text selection
+                try {
+                  const selection = window.getSelection();
+                  // Check if copy or paste key was pressed via the clipboard manager state
+                  const copyOrPastePressed = cmState && (cmState.copyKeyPressed === true || cmState.pasteKeyPressed === true);
+                  
+                  // Only skip if there's a selection AND we're not forcing AND no copy/paste was pressed
+                  if (!forceCheck && 
+                      selection && 
+                      !selection.isCollapsed && 
+                      selection.toString().trim() !== '' && 
+                      !copyOrPastePressed) {
+                    console.log('[Clipboard Manager] Skipping clipboard read - user has active text selection and no copy/paste key was pressed');
+                    safeResponse.skipReason = 'active_selection';
+                    return safeResponse;
+                  }
+                  
+                  // If copy or paste was pressed, log it to help with debugging
+                  if (copyOrPastePressed) {
+                    console.log('[Clipboard Manager] Processing clipboard despite selection - copy or paste key was pressed');
+                  }
+                } catch (selectionError) {
+                  console.error('[Clipboard Manager] Error checking selection:', selectionError);
+                }
+                
+                // Check if mouse button is down
+                try {
+                  if (!forceCheck && document.querySelector(':active')) {
+                    console.log('[Clipboard Manager] Skipping clipboard read - mouse or key activity detected');
+                    safeResponse.skipReason = 'active_interaction';
+                    return safeResponse;
+                  }
+                } catch (activeError) {
+                  console.error('[Clipboard Manager] Error checking active elements:', activeError);
+                }
+              }
+              
+              // Process actual clipboard content - fallback to execCommand method
+              try {
+    // Use modern Clipboard API if available (preferred method)
+    if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      console.log('[Clipboard Manager] Using Clipboard API');
+                  safeResponse.useClipboardAPI = true;
+                  return safeResponse;
+    }
+    
+    console.log('[Clipboard Manager] Falling back to execCommand paste');
+    
+    // Fallback for browsers without Clipboard API support
+    const textArea = document.createElement('textarea');
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+                textArea.setAttribute('readonly', 'true');
+    
+    document.body.appendChild(textArea);
+    
+    // Save current selection and active element state
+    const savedActiveElement = document.activeElement;
+    let savedSelection = null;
+    
+    // Save selection if we have one
+    if (window.getSelection) {
+      savedSelection = window.getSelection();
+    }
+    
+    // Save input selection state if applicable
+    let savedSelectionStart = null;
+    let savedSelectionEnd = null;
+    
+    if (savedActiveElement && 'selectionStart' in savedActiveElement) {
+      savedSelectionStart = savedActiveElement.selectionStart;
+      savedSelectionEnd = savedActiveElement.selectionEnd;
+    }
+    
+    // Focus the textarea without scrolling the page
+    textArea.focus({preventScroll: true});
+    
+    // Execute paste command
+    let successful = false;
+    try {
+      successful = document.execCommand('paste');
+    } catch (e) {
+      console.error('[Clipboard Manager] Error during paste command:', e);
+    }
+    
+    // Get clipboard text
+    const clipboardText = textArea.value;
+    
+    // Clean up
+    document.body.removeChild(textArea);
+    
+    // Restore selection
+    if (savedSelection) {
+                  savedSelection.removeAllRanges();
+                  if (savedSelection.rangeCount > 0) {
+                    savedSelection.addRange(savedSelection.getRangeAt(0));
+                  }
+    }
+    
+    // Restore active element focus
+    if (savedActiveElement) {
+      savedActiveElement.focus({preventScroll: true});
+      
+      // Restore selection within input if applicable
+      if (savedSelectionStart !== null && savedSelectionEnd !== null) {
+        savedActiveElement.selectionStart = savedSelectionStart;
+        savedActiveElement.selectionEnd = savedSelectionEnd;
+      }
+    }
+    
+    // Log outcome
+    if (successful) {
+      console.log('[Clipboard Manager] Successfully read clipboard content');
+    } else {
+      console.log('[Clipboard Manager] Failed to read clipboard content with execCommand');
+    }
+    
+                safeResponse.text = clipboardText;
+                safeResponse.success = successful;
+                return safeResponse;
+              } catch (clipboardError) {
+                console.error('[Clipboard Manager] Error reading clipboard content:', clipboardError);
+                safeResponse.error = clipboardError.message;
                 return safeResponse;
               }
-            } catch (error) {
-              console.error('[Clipboard Manager] Critical error in safeReadClipboard:', error);
+            } catch (outerError) {
+              console.error('[Clipboard Manager] Critical error reading clipboard:', outerError);
               return {
                 success: false,
-                error: 'Critical error: ' + error.message 
+                text: null,
+                skipReason: null,
+                error: outerError.message || 'Unknown error'
               };
             }
           }
           
+          // Actually call the function and return its result
           return safeReadClipboard();
         },
-        args: [force]
+        args: [force] // Pass the force parameter to the content script
+      }).catch(error => {
+        console.error('Failed to execute script:', error);
+        return [{ result: { 
+          success: false, 
+          text: null,
+          skipReason: null,
+          error: error.message || 'Script execution failed' 
+        }}];
       });
       
-      // Process the result
-      if (clipboardResults && clipboardResults.length > 0) {
-        const clipboardResult = clipboardResults[0].result;
+      if (!clipboardResults || clipboardResults.length === 0) {
+        logVerbose('No clipboard results returned from content script');
+        isProcessingClipboard = false;
+        return;
+      }
+      
+      // Ultra-safe access to clipboardResult
+      const clipboardResult = clipboardResults[0]?.result || { 
+        success: false, 
+        text: null,
+        skipReason: null,
+        error: 'No result data'
+      };
+      
+      logVerbose('Clipboard result from page:', clipboardResult);
+      
+      // Handle different result formats with safe property access
+      if (clipboardResult.skipReason) {
+        logVerbose('Skipping clipboard processing because:', clipboardResult.skipReason);
+        isProcessingClipboard = false;
+        return;
+      }
+      
+      if (clipboardResult.error) {
+        console.error('Error reading clipboard:', clipboardResult.error);
+        isProcessingClipboard = false;
+        return;
+      }
+      
+      if (clipboardResult.useClipboardAPI) {
+        // If the content script indicates we should use the API
+        // we can't do it directly in the background, so we need to 
+        // inject another script to get the content
+        logVerbose('Content script suggested API, trying alternative method');
         
-        if (clipboardResult && clipboardResult.then) {
-          // It's a promise, need to resolve it
-          clipboardResult.then(text => {
-            if (text && typeof text === 'string' && text !== lastClipboardText) {
-              processClipboardContent(text);
+        try {
+          const readResult = await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            func: () => {
+              return new Promise((resolve) => {
+                try {
+                  // Create a temporary textarea
+                  const textarea = document.createElement('textarea');
+                  textarea.style.position = 'fixed';
+                  textarea.style.left = '-999999px';
+                  textarea.style.top = '-999999px';
+                  document.body.appendChild(textarea);
+                  
+                  // Focus and execute paste
+                  textarea.focus();
+                  document.execCommand('paste');
+                  
+                  // Get the pasted content
+                  const content = textarea.value;
+                  
+                  // Clean up
+                  document.body.removeChild(textarea);
+                  
+                  resolve({ success: true, text: content });
+                } catch (e) {
+                  resolve({ success: false, error: e.message });
+                }
+              });
             }
-          }).catch(error => {
-            console.error('Error resolving clipboard promise:', error);
           });
-        } else if (clipboardResult && clipboardResult.text && clipboardResult.text !== lastClipboardText) {
-          // It's already a text result
-          processClipboardContent(clipboardResult.text);
-        } else if (typeof clipboardResult === 'string' && clipboardResult !== lastClipboardText) {
-          // Direct string result
-          processClipboardContent(clipboardResult);
-        } else if (clipboardResult && clipboardResult.error) {
-          console.warn('Error reading clipboard:', clipboardResult.error);
+          
+          if (readResult && readResult[0] && readResult[0].result) {
+            const result = readResult[0].result;
+            if (result.success && result.text) {
+              logVerbose('Got clipboard content from alternative method:', 
+                        result.text.substring(0, 50) + '...');
+              
+              if (result.text !== lastClipboardText) {
+                await processClipboardContent(result.text);
+              } else {
+                logVerbose('Content unchanged, skipping');
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Error with alternative clipboard method:', err);
+        }
+      } else if (clipboardResult.text !== undefined) {
+        // Handle text content
+        const clipboardText = clipboardResult.text;
+        
+        logVerbose('Clipboard text from page:', 
+                  clipboardText ? clipboardText.substring(0, 50) + '...' : 'empty');
+        
+        if (clipboardText && clipboardText !== lastClipboardText) {
+          logVerbose('Processing new clipboard content from page');
+          await processClipboardContent(clipboardText);
+        } else {
+          logVerbose('No new content detected from page');
         }
       }
-    } catch (error) {
-      console.error('Error executing clipboard read script:', error);
+      
+      // Also check for image data
+      await checkForImageData();
+      
+    } catch (err) {
+      console.error('Error reading clipboard from page:', err);
+    } finally {
+      isProcessingClipboard = false;
     }
-    
-    isProcessingClipboard = false;
   } catch (error) {
-    console.error('Error in clipboard check:', error);
+    console.error('Error checking clipboard:', error);
     isProcessingClipboard = false;
   }
 };
@@ -689,125 +750,51 @@ const checkForImageData = async () => {
     try {
       logVerbose('Attempting to check for clipboard image in tab', activeTab.id);
       
-      // First, try using the navigator.clipboard API through content script
       const results = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: () => {
-          return new Promise((resolve) => {
-            try {
-              // Create a hidden container for paste operations
-              const container = document.createElement('div');
-              container.contentEditable = true;
-              container.style.position = 'fixed';
-              container.style.top = '-9999px';
-              container.style.left = '-9999px';
-              container.style.width = '1px';
-              container.style.height = '1px';
-              container.style.opacity = '0';
-              document.body.appendChild(container);
-              
-              // Flag to track if an image was found
-              let imageDetected = false;
-              let imageData = null;
-              
-              // Handle paste events to detect images
-              container.addEventListener('paste', (e) => {
-                console.log('[Clipboard Manager] Paste event triggered for image check');
-                
-                try {
-                  if (e.clipboardData && e.clipboardData.items) {
-                    // Log what's in the clipboard for debugging
-                    console.log('[Clipboard Manager] Clipboard items count:', e.clipboardData.items.length);
-                    
-                    for (let i = 0; i < e.clipboardData.items.length; i++) {
-                      const item = e.clipboardData.items[i];
-                      console.log('[Clipboard Manager] Clipboard item:', item.type);
-                      
-                      // Check if item is an image
-                      if (item.type.indexOf('image') !== -1) {
-                        console.log('[Clipboard Manager] Image detected in clipboard');
-                        imageDetected = true;
-                        
-                        // Get image as a file
-                        const file = item.getAsFile();
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = (event) => {
-                            if (event.target && event.target.result) {
-                              imageData = event.target.result;
-                              console.log('[Clipboard Manager] Image data loaded successfully, length:', 
-                                imageData.length);
-                              
-                              // Resolve the promise with the image data
-                              resolve({ imageDetected: true, imageData });
-                            }
-                          };
-                          
-                          // Start the file reading process
-                          reader.readAsDataURL(file);
-                          // Prevent further processing
-                          return;
-                        }
-                      }
-                    }
-                  }
-                } catch (pasteError) {
-                  console.error('[Clipboard Manager] Error processing paste event:', pasteError);
-                }
-                
-                // If we reach here, no image was detected
-                setTimeout(() => {
-                  if (!imageDetected) {
-                    // Cleanup
-                    try {
-                      document.body.removeChild(container);
-                    } catch (e) {}
-                    resolve({ imageDetected: false });
-                  }
-                }, 100);
-              });
-              
-              // Focus and trigger paste
-              container.focus();
-              document.execCommand('paste');
-              
-              // Set a timeout in case paste doesn't trigger or resolve
-              setTimeout(() => {
-                if (!imageDetected) {
-                  // Cleanup
-                  try {
-                    document.body.removeChild(container);
-                  } catch (e) {}
-                  resolve({ imageDetected: false });
-                }
-              }, 500);
-            } catch (error) {
-              console.error('[Clipboard Manager] Image detection error:', error);
-              resolve({ imageDetected: false, error: error.message });
-            }
-          });
-        }
+      target: { tabId: activeTab.id },
+        func: checkForImageInPage, // Use func instead of function for newer Chrome versions
+        args: [] // Explicitly pass empty args
       });
       
-      // Process the results
-      if (!results || !results.length || !results[0] || !results[0].result) {
-        console.log('No results from image check script or invalid response structure');
+      // Comprehensive null and undefined checking
+      if (!results) {
+        logVerbose('No results from image check script');
         return null;
       }
       
+      if (!results.length) {
+        logVerbose('Empty results array from image check script');
+        return null;
+      }
+      
+      if (!results[0]) {
+        logVerbose('First result is null from image check script');
+        return null;
+      }
+      
+      // The result might be null or undefined
       const result = results[0].result;
       
-      // Check if image was detected and we have the data
-      if (result.imageDetected && result.imageData) {
-        console.log('Image detected and data received, processing...');
-        
-        // Process the image data directly
-        await processClipboardImage(result.imageData);
-        return { imageDetected: true };
-      } else if (result.error) {
-        console.error('Error in image detection:', result.error);
+      if (!result) {
+        logVerbose('Result value is null or undefined from image check script');
+        return null;
+      }
+      
+      // Safe property access
+      if (result.error) {
+        logVerbose('Error in image check:', result.error);
+        return null;
+      }
+      
+      if (result.skipReason) {
+        logVerbose('Skipping image processing due to:', result.skipReason);
+        return null;
+      }
+      
+      if (result.imageDetected) {
+        logVerbose('Image detected in clipboard');
       } else {
-        console.log('No image detected in clipboard');
+        logVerbose('No image detected in clipboard');
       }
       
       return result;
@@ -822,24 +809,160 @@ const checkForImageData = async () => {
 };
 
 /**
+ * Function to execute in page context to check for image data
+ * NOTE: This function runs in the page context, so it cannot access extension variables or functions
+ * @returns {Object} Result object with properties for the image check
+ */
+function checkForImageInPage() {
+  try {
+    // Utilities for safely accessing DOM elements
+    const safeGetSelection = () => {
+      try {
+        const selection = window.getSelection();
+        if (!selection) return null;
+        return selection;
+      } catch (e) {
+        console.error('[Clipboard Manager] Error accessing selection:', e);
+        return null;
+      }
+    };
+    
+    // Create a safe return value
+    const createResponse = (data) => {
+      return Object.assign({
+        success: true,
+        imageDetected: false,
+        skipReason: null,
+        error: null
+      }, data || {});
+    };
+    
+    // Check if we're allowed to read clipboard
+    const activeElement = document.activeElement;
+    const isUserTyping = activeElement && 
+                         (activeElement.tagName === 'INPUT' || 
+                          activeElement.tagName === 'TEXTAREA' || 
+                          activeElement.isContentEditable) &&
+                         document.hasFocus();
+                         
+    if (isUserTyping) {
+      console.log('[Clipboard Manager] Skipping image read - user is typing');
+      return createResponse({ skipReason: 'user_typing' });
+    }
+    
+    // Check for active selection - get selection safely
+    const selection = safeGetSelection();
+    const hasSelection = selection && 
+                         !selection.isCollapsed && 
+                         selection.toString().trim() !== '';
+    
+    if (hasSelection) {
+      console.log('[Clipboard Manager] Skipping image read - active selection');
+      return createResponse({ skipReason: 'active_selection' });
+    }
+    
+    // Create a hidden div element for paste
+    const div = document.createElement('div');
+    div.contentEditable = true;
+    div.style.position = 'fixed';
+    div.style.left = '-99999px';
+    div.style.top = '-99999px';
+    
+    // Only append if we can
+    if (!document.body) {
+      console.log('[Clipboard Manager] No document body found');
+      return createResponse({ skipReason: 'no_document_body' });
+    }
+    
+    document.body.appendChild(div);
+    let imageDetected = false;
+    
+    try {
+    div.focus();
+    
+    // Listen for paste event to capture image
+    div.addEventListener('paste', function(e) {
+        try {
+          if (!e || !e.clipboardData || !e.clipboardData.items) {
+            return;
+          }
+          
+      for (const item of e.clipboardData.items) {
+            if (item.type && item.type.indexOf('image') === 0) {
+              imageDetected = true;
+              
+              try {
+          const blob = item.getAsFile();
+                if (blob) {
+          const reader = new FileReader();
+          reader.onload = function(event) {
+                    if (event && event.target && event.target.result) {
+                      try {
+            chrome.runtime.sendMessage({ 
+              action: 'clipboardImageDetected', 
+              content: event.target.result 
+            });
+                      } catch (msgError) {
+                        console.error('[Clipboard Manager] Error sending image data:', msgError);
+                      }
+                    }
+          };
+          reader.readAsDataURL(blob);
+        }
+              } catch (fileError) {
+                console.error('[Clipboard Manager] Error processing file:', fileError);
+              }
+              
+              break;
+            }
+          }
+        } catch (pasteError) {
+          console.error('[Clipboard Manager] Error in paste handler:', pasteError);
+        }
+      });
+      
+      // Execute paste command
+    document.execCommand('paste');
+    } catch (commandError) {
+      console.error('[Clipboard Manager] Error executing paste command:', commandError);
+    } finally {
+      // Clean up - always try to remove the element
+      setTimeout(() => {
+        try {
+          if (div && div.parentNode) {
+            div.parentNode.removeChild(div);
+          }
+        } catch (cleanupError) {
+          console.error('[Clipboard Manager] Error cleaning up div:', cleanupError);
+        }
+      }, 100);
+    }
+    
+    return createResponse({ imageDetected });
+  } catch (error) {
+    console.error('[Clipboard Manager] Error in checkForImageInPage:', error);
+    return { 
+      success: false, 
+      error: error.message || 'Unknown error',
+      imageDetected: false 
+    };
+  }
+}
+
+/**
  * Process clipboard image content
  * @param {string} dataUrl - Image data URL
  */
 const processClipboardImage = async (dataUrl) => {
   try {
     // Validate data URL
-    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
-      console.warn('Background: Invalid image data format:', 
-                  dataUrl ? `${dataUrl.substring(0, 30)}...` : 'undefined');
-      console.warn('Background: Type of dataUrl:', typeof dataUrl);
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+      console.warn('Background: Invalid image data');
       return;
     }
     
-    console.log('Background: Processing clipboard image data, length:', dataUrl.length);
-    
     // Skip if we already have this image
-    const isDuplicate = clipboardData.items.some(item => item.content === dataUrl);
-    if (isDuplicate) {
+    if (clipboardData.items.some(item => item.content === dataUrl)) {
       console.log('Background: Duplicate image, skipping');
       return;
     }
@@ -870,8 +993,6 @@ const processClipboardImage = async (dataUrl) => {
       charCount: imageSizeKB + 'KB'
     };
     
-    console.log('Background: Adding image to clipboard history');
-    
     // Add item to history
     clipboardData.items.unshift(newItem);
     
@@ -883,51 +1004,15 @@ const processClipboardImage = async (dataUrl) => {
     }
     
     // Save to storage
-    const saveResult = await saveClipboardData();
-    if (!saveResult.success) {
-      console.error('Background: Failed to save clipboard data:', saveResult.error);
-      return;
-    }
-    
-    console.log('Background: Saved clipboard data successfully:', {
-      savedItems: saveResult.savedItems,
-      totalItems: clipboardData.items.length
-    });
+    await saveClipboardData();
     
     // Notify any open UI
-    chrome.runtime.sendMessage({ 
-      action: 'clipboardDataUpdated',
-      source: 'image_processor',
-      timestamp: Date.now()
-    }, response => {
-      if (chrome.runtime.lastError) {
-        console.log('No UI listening for clipboardDataUpdated message (this is normal)');
-      } else if (response) {
-        console.log('UI received image update notification', response);
-      }
-    });
-    
-    // Also broadcast with the more specific message type
-    broadcastClipboardUpdate();
-    
-    // Show notification
-    handleShowNotification({
-      type: 'success',
-      message: 'Image copied to clipboard history'
-    });
+    chrome.runtime.sendMessage({ action: 'clipboardDataUpdated' });
     
     // Log success
-    console.log('Background: Clipboard image saved successfully');
-    return true;
+    console.log('Background: Clipboard image saved');
   } catch (error) {
     console.error('Error processing clipboard image:', error);
-    
-    // Show notification for the error
-    handleShowNotification({
-      type: 'error',
-      message: 'Failed to process clipboard image'
-    });
-    return false;
   }
 };
 
@@ -1079,6 +1164,14 @@ const openFloatingWindow = async () => {
   }
 };
 
+// Window close listener
+const windowCloseListener = (windowId) => {
+  if (windowId === floatingWindowId) {
+    floatingWindowId = null;
+    chrome.windows.onRemoved.removeListener(windowCloseListener);
+  }
+};
+
 /**
  * Save clipboard data to storage
  * @returns {Promise<Object>} Result of the save operation
@@ -1108,14 +1201,23 @@ const saveClipboardData = async () => {
       }))
     };
     
-    // Save to sync storage for persistence across browser restarts
-    await chrome.storage.sync.set({ clipboardData: dataToSave });
+    // Log persistence attempt for debugging
+    console.log(`Attempting to save ${dataToSave.items.length} clipboard items to persistent storage`);
     
-    // Also save to local storage for faster access
+    // Save to persistent storage
     await chrome.storage.local.set({ clipboardData: dataToSave });
     
+    // For critical operations, create a synchronous backup to session storage
+    // which is faster but will be lost on browser close
+    try {
+      await chrome.storage.session.set({ clipboardData_backup: dataToSave });
+    } catch (sessionError) {
+      console.warn('Session storage backup failed:', sessionError);
+      // Non-critical, continue
+    }
+    
     // Verify data was saved by reading it back
-    const savedData = await chrome.storage.sync.get('clipboardData');
+    const savedData = await chrome.storage.local.get('clipboardData');
     if (savedData && savedData.clipboardData && Array.isArray(savedData.clipboardData.items)) {
       logVerbose('Clipboard data successfully saved, items:', savedData.clipboardData.items.length);
       return { 
@@ -1145,17 +1247,11 @@ const loadClipboardData = async () => {
   try {
     console.log('Background: Loading clipboard data and settings...');
     
-    // Load the clipboard data from sync storage first
-    let result = await chrome.storage.sync.get('clipboardData');
-    
-    // If not found in sync, try local storage as fallback (for backward compatibility)
-    if (!result.clipboardData) {
-      console.log('Background: No clipboard data found in sync storage, checking local storage');
-      result = await chrome.storage.local.get('clipboardData');
-    }
+    // Load the clipboard data from the persistent storage
+    const result = await chrome.storage.local.get('clipboardData');
     
     // Initialize if not found
-    if (!result.clipboardData) {
+    if (!result.clipboardData || !result.clipboardData.items || !Array.isArray(result.clipboardData.items)) {
       clipboardData = {
         items: [],
         favorites: []
@@ -1164,17 +1260,25 @@ const loadClipboardData = async () => {
     } else {
       clipboardData = result.clipboardData;
       console.log('Background: Loaded clipboard data, items:', clipboardData.items.length);
+      
+      // Sanitize data to ensure all properties are present
+      clipboardData.items = clipboardData.items.map(item => ({
+        id: item.id || generateId(),
+        content: item.content || '',
+        type: item.type || 'text',
+        timestamp: item.timestamp || Date.now(),
+        isFavorite: !!item.isFavorite,
+        charCount: item.charCount || (item.content ? item.content.length : 0)
+      }));
+      
+      // Ensure favorites array is properly initialized
+      if (!clipboardData.favorites || !Array.isArray(clipboardData.favorites)) {
+        clipboardData.favorites = clipboardData.items.filter(item => item.isFavorite);
+      }
     }
     
-    // Load settings from sync storage first
-    let settingsResult = await chrome.storage.sync.get('settings');
-    
-    // If not found in sync, try local storage as fallback
-    if (!settingsResult.settings) {
-      console.log('Background: No settings found in sync storage, checking local storage');
-      settingsResult = await chrome.storage.local.get('settings');
-    }
-    
+    // Load settings
+    const settingsResult = await chrome.storage.local.get('settings');
     if (settingsResult.settings) {
       const settings = settingsResult.settings;
       
@@ -1207,7 +1311,7 @@ const loadClipboardData = async () => {
         maxImageSize: 1000
       };
       
-      await chrome.storage.sync.set({ settings: defaultSettings });
+      await chrome.storage.local.set({ settings: defaultSettings });
       console.log('Background: Saved default settings');
     }
     
@@ -1480,46 +1584,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
         
       case 'clipboardImageDetected':
-        logVerbose('Image data detected, processing...', message.content ? `(data length: ${message.content.length.toString().substring(0, 30)}...)` : '(no content)');
-        
-        if (!message.content) {
-          console.error('Missing image content in clipboardImageDetected message');
-          sendResponse({ error: 'Missing image content' });
-          break;
-        }
-        
-        // Process the image asynchronously
-        processClipboardImage(message.content)
-          .then((result) => {
-            sendResponse({ success: result });
-          })
-          .catch(error => {
-            console.error('Error processing clipboard image:', error);
-            sendResponse({ error: error.message });
-          });
-        
-        // Keep channel open for async response
-        return true;
-      
-      case 'checkForImages':
-        // Manual request to check for images in the clipboard
-        console.log('Manual image check requested');
-        checkForImageData()
-          .then(result => {
-            sendResponse({
-              success: true,
-              imageDetected: !!(result && result.imageDetected),
-              message: 'Image check completed'
-            });
-          })
-          .catch(error => {
-            console.error('Error during manual image check:', error);
-            sendResponse({ 
-              success: false, 
-              error: error.message,
-              message: 'Failed to check for images'
-            });
-          });
+        logVerbose('Image data detected, processing...');
+        processClipboardImage(message.content).then(() => {
+          sendResponse({ success: true });
+        }).catch(error => {
+          console.error('Error processing clipboard image:', error);
+          sendResponse({ error: error.message });
+        });
         return true; // Keep channel open for async response
       
       case 'clipboardDataUpdated':
@@ -1566,7 +1637,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         
       case 'toggleVerboseLogging':
         verboseLogging = message.enabled;
-        chrome.storage.sync.set({ verboseLogging: verboseLogging });
+        chrome.storage.local.set({ verboseLogging: verboseLogging });
         logVerbose('Verbose logging ' + (verboseLogging ? 'enabled' : 'disabled'));
         sendResponse({ success: true });
         break;
@@ -1646,7 +1717,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
           
           // Save the settings
-          chrome.storage.sync.set({ settings: message.settings }, () => {
+          chrome.storage.local.set({ settings: message.settings }, () => {
             console.log('Background: Settings saved to storage');
           });
           
@@ -1674,6 +1745,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
-// Initialize immediately to ensure background monitoring starts right away
-// This needs to be placed after all function declarations
-initialize();
+/**
+ * Check if a URL is restricted (extension can't run on it)
+ * @param {string} url - URL to check
+ * @returns {boolean} - True if restricted
+ */
+const isRestrictedUrl = (url) => {
+  if (!url) return true;
+  
+  const restrictedProtocols = [
+    'chrome:', 'chrome-extension:', 'chrome-search:',
+    'edge:', 'devtools:', 'about:', 'data:',
+    'file:', 'view-source:'
+  ];
+  
+  try {
+    const urlObj = new URL(url);
+    return restrictedProtocols.some(protocol => urlObj.protocol.startsWith(protocol));
+  } catch (error) {
+    return true;
+  }
+};
+
+/**
+ * Generate a unique ID
+ * @returns {string} - Unique ID
+ */
+const generateId = () => {
+  return Date.now().toString(36) + Math.random().toString(36).substring(2);
+};
+
+/**
+ * Log verbose messages (only if enabled)
+ * @param {...any} args - Arguments to log
+ */
+const logVerbose = (...args) => {
+  if (verboseLogging) {
+    console.log('[Clipboard Manager]', ...args);
+  }
+};
+
+// Handle extension startup
+chrome.runtime.onStartup.addListener(initialize);
+
+// Also initialize on install/update to ensure clipboard monitoring starts immediately
+chrome.runtime.onInstalled.addListener(initialize);
+
+// Handle extension shutdown
+chrome.runtime.onSuspend.addListener(() => {
+  if (checkInterval) {
+    clearInterval(checkInterval);
+  }
+  logVerbose('Extension suspended');
+}); 

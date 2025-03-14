@@ -26,7 +26,9 @@
     "activeTab"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module",
+    "persistence": true
   },
   "content_scripts": [
     {
@@ -36,7 +38,7 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_start"
+      "run_at": "document_idle"
     }
   ]
 }

@@ -73,9 +73,8 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
         // Update filtered items based on the new data
         filterItems(response.items, activeTab, searchQuery);
         
-        if (showLoading) {
-          setLoading(false);
-        }
+        // Always set loading to false, even if there are no items
+        setLoading(false);
       }
     } catch (err) {
       console.error('Error loading clipboard data:', err);

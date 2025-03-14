@@ -298,7 +298,7 @@ const ClipboardList = ({
       )}
       
       <div className="clipboard-items" ref={listRef}>
-        {isLoading && items === undefined ? (
+        {isLoading ? (
           <div className="empty-state">
             <i className="fas fa-spinner fa-spin"></i>
             <p>Loading clipboard items...</p>

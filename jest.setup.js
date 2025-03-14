@@ -6,7 +6,7 @@ global.chrome = {
     sendMessage: jest.fn(),
     onMessage: {
       addListener: jest.fn()
-    },
+    }, 
     onInstalled: {
       addListener: jest.fn()
     },
