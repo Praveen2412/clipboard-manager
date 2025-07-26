@@ -38,10 +38,16 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
    */
   const loadData = useCallback(async (showLoading = true) => {
     try {
-      // Only set loading state for initial data fetch or when explicitly requested
-      if (showLoading && clipboardData.items.length === 0) {
-        setLoading(true);
+      // Use a loading timeout instead of showing loading immediately
+      let loadingTimeout = null;
+      
+      if (showLoading) {
+        // Only show loading indicator if the operation takes longer than 150ms
+        loadingTimeout = setTimeout(() => {
+          setLoading(true);
+        }, 150);
       }
+      
       setError(null);
       
       console.log('Requesting clipboard data from background script...');
@@ -56,6 +62,11 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
           }
         });
       });
+      
+      // Cancel loading timeout since we got a response
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+      }
       
       // Check for errors
       if (response.error) {
@@ -73,7 +84,7 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
         // Update filtered items based on the new data
         filterItems(response.items, activeTab, searchQuery);
         
-        // Always set loading to false, even if there are no items
+        // Always set loading to false once we've received a response
         setLoading(false);
       }
     } catch (err) {
@@ -83,9 +94,8 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
       if (isMountedRef.current) {
         setError('Failed to load clipboard data');
         setFilteredItems([]); // Ensure we don't show old data on error
-        if (showLoading) {
-          setLoading(false);
-        }
+        // Always ensure loading is set to false on error
+        setLoading(false);
       }
     }
   }, [activeTab, searchQuery, filterItems]);
@@ -102,6 +112,7 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
       return;
     }
     
+    // Immediate filtering without showing loading state
     let filtered = [];
     
     // Apply tab filter
@@ -138,13 +149,15 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
     }
     
     setFilteredItems(filtered);
+    
+    // Always ensure loading is false after filtering
+    setLoading(false);
   }, []);
   
   // Effect to apply filtering when tab or search query changes
   useEffect(() => {
     if (clipboardData && clipboardData.items) {
-      // Important: Set loading to false even when just filtering
-      setLoading(false);
+      // Don't show loading when just filtering existing data
       filterItems(clipboardData.items, activeTab, searchQuery);
     }
   }, [activeTab, searchQuery, filterItems, clipboardData]);
@@ -478,13 +491,33 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
    * @param {string} tab - New active tab
    */
   const handleTabChange = useCallback((tab) => {
-    // Don't set loading state when changing tabs
+    // Create a variable to track if we need to show the loading state
+    let loadingTimeout = null;
+    
+    // Only show loading if filtering takes more than 100ms
+    loadingTimeout = setTimeout(() => {
+      setLoading(true);
+    }, 150);
+    
+    // Update the active tab
     setActiveTab(tab);
+    
     if (clipboardData && clipboardData.items) {
-      // Explicitly ensure loading is false
-      setLoading(false);
+      // Filter the items with the new tab
       filterItems(clipboardData.items, tab, searchQuery);
+      
+      // Cancel the loading timeout if filtering completes quickly
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+      }
     }
+    
+    return () => {
+      // Clean up timeout if component unmounts or function is called again
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+      }
+    };
   }, [clipboardData, filterItems, searchQuery]);
   
   /**
@@ -492,13 +525,33 @@ const useClipboardData = (initialTab = 'all', initialQuery = '') => {
    * @param {string} query - New search query
    */
   const handleSearchQueryChange = useCallback((query) => {
-    // Don't set loading state when searching
+    // Create a variable to track if we need to show the loading state
+    let loadingTimeout = null;
+    
+    // Only show loading if filtering takes more than 150ms
+    loadingTimeout = setTimeout(() => {
+      setLoading(true);
+    }, 150);
+    
+    // Update the search query
     setSearchQuery(query);
+    
     if (clipboardData && clipboardData.items) {
-      // Explicitly ensure loading is false
-      setLoading(false);
+      // Filter the items with the new query
       filterItems(clipboardData.items, activeTab, query);
+      
+      // Cancel the loading timeout if filtering completes quickly
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+      }
     }
+    
+    return () => {
+      // Clean up timeout if component unmounts or function is called again
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
+      }
+    };
   }, [clipboardData, filterItems, activeTab]);
   
   /**

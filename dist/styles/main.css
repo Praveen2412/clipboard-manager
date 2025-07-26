@@ -28,6 +28,11 @@
   /* RGB values for alpha operations */
   --accent-rgb: 44, 123, 229; /* Light theme blue */
   
+  /* Status colors */
+  --success-color: #34C759; /* Green for success */
+  --error-color: #FF3B30; /* Red for errors */
+  --warning-color: #f0ad4e; /* Orange for warnings */
+  
   /* Other variables */
   --border-radius: 4px;
   --border-radius-md: 6px;
@@ -650,37 +655,61 @@ input[type="number"]:focus, input[type="text"]:focus {
 .notification {
   position: fixed;
   bottom: 20px;
-  right: 20px;
-  padding: 10px 15px;
-  border-radius: var(--border-radius);
-  background-color: var(--secondary);
-  color: var(--text);
-  font-size: 13px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  transform: translateY(100px);
-  opacity: 0;
-  transition: transform var(--transition-speed), opacity var(--transition-speed);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 4px;
+  color: white;
+  font-size: 14px;
+  max-width: 90%;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
   z-index: 1000;
+  animation: notificationFadeIn 0.3s ease-out, notificationFadeOut 0.3s ease-in 2.7s forwards;
+  pointer-events: none;
 }
 
-.notification.show {
-  transform: translateY(0);
-  opacity: 1;
+/* Special animation timing for error and warning notifications */
+.notification[data-duration="long"] {
+  animation: notificationFadeIn 0.3s ease-out, notificationFadeOut 0.3s ease-in 5.7s forwards;
+}
+
+@keyframes notificationFadeIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes notificationFadeOut {
+  from {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
 }
 
 .notification.success {
-  background-color: #34C759;
-  color: white;
+  background-color: var(--success-color);
 }
 
 .notification.error {
-  background-color: #FF3B30;
-  color: white;
+  background-color: var(--error-color);
 }
 
 .notification.warning {
-  background-color: #FF9500;
-  color: white;
+  background-color: var(--warning-color);
+}
+
+.notification.info {
+  background-color: var(--secondary-color);
 }
 
 /* Dark Mode Styles - Applied when body has dark-mode class */
@@ -1136,6 +1165,11 @@ body.floating-window .app-container {
   pointer-events: none;
 }
 
+/* Special animation timing for error and warning notifications */
+.notification[data-duration="long"] {
+  animation: notificationFadeIn 0.3s ease-out, notificationFadeOut 0.3s ease-in 5.7s forwards;
+}
+
 @keyframes notificationFadeIn {
   from {
     opacity: 0;
@@ -1164,6 +1198,10 @@ body.floating-window .app-container {
 
 .notification.error {
   background-color: var(--error-color);
+}
+
+.notification.warning {
+  background-color: var(--warning-color);
 }
 
 .notification.info {

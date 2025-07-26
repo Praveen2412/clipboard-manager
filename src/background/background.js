@@ -4,7 +4,7 @@
  */
 
 // Constants
-const CLIPBOARD_CHECK_INTERVAL = 1000; // 2 seconds
+const CLIPBOARD_CHECK_INTERVAL = 1000; // 1 seconds
 
 // State variables
 let clipboardData = {
@@ -47,12 +47,6 @@ const initialize = async () => {
     
     // Load clipboard data from storage
     await loadClipboardData();
-    
-    // Make sure we're not already monitoring (avoid duplicate intervals)
-    if (checkInterval) {
-      clearInterval(checkInterval);
-      checkInterval = null;
-    }
     
     // Start clipboard monitoring
     startClipboardMonitoring();
@@ -97,8 +91,6 @@ const initialize = async () => {
     return true;
   } catch (error) {
     console.error('Error initializing background script:', error);
-    // Attempt recovery
-    startClipboardMonitoring();
     return false;
   }
 };
@@ -112,11 +104,6 @@ const startClipboardMonitoring = () => {
   }
   checkInterval = setInterval(checkClipboardForChanges, CLIPBOARD_CHECK_INTERVAL);
   logVerbose('Clipboard monitoring started');
-  
-  // Perform an initial check to start capturing immediately
-  setTimeout(() => {
-    checkClipboardForChanges(true);
-  }, 100);
 };
 
 /**
@@ -575,6 +562,9 @@ const broadcastClipboardUpdate = () => {
   try {
     console.log('Broadcasting clipboard update to all UI instances');
     
+    // Refresh context menus to reflect the latest clipboard data
+    setupContextMenus();
+    
     // Check if there are any active connections before sending messages
     // Note: In background scripts, we can't directly check for listeners,
     // but we can track active connections based on window IDs
@@ -1006,6 +996,9 @@ const processClipboardImage = async (dataUrl) => {
     // Save to storage
     await saveClipboardData();
     
+    // Refresh context menus to include the new image
+    setupContextMenus();
+    
     // Notify any open UI
     chrome.runtime.sendMessage({ action: 'clipboardDataUpdated' });
     
@@ -1031,7 +1024,15 @@ const setupContextMenus = () => {
       contexts: ['editable']
     });
     
-    // Add favorites to menu (limited to 10)
+    // Add "Favorites" submenu
+    chrome.contextMenus.create({
+      id: 'favorites-submenu',
+      parentId: 'clipboard-manager',
+      title: 'Favorites',
+      contexts: ['editable']
+    });
+    
+    // Add favorites to submenu (limited to 10)
     const favorites = clipboardData.favorites.slice(0, 10);
     favorites.forEach((item, index) => {
       // Truncate content for menu title
@@ -1042,7 +1043,32 @@ const setupContextMenus = () => {
       
       chrome.contextMenus.create({
         id: `favorite-${item.id}`,
-        parentId: 'clipboard-manager',
+        parentId: 'favorites-submenu',
+        title: title,
+        contexts: ['editable']
+      });
+    });
+    
+    // Add "Recent Items" submenu
+    chrome.contextMenus.create({
+      id: 'recent-submenu',
+      parentId: 'clipboard-manager',
+      title: 'Recent Items',
+      contexts: ['editable']
+    });
+    
+    // Add recent items to submenu (limited to 10)
+    const recentItems = clipboardData.items.slice(0, 10);
+    recentItems.forEach((item, index) => {
+      // Truncate content for menu title
+      let title = item.content;
+      if (title.length > 50) {
+        title = title.substring(0, 47) + '...';
+      }
+      
+      chrome.contextMenus.create({
+        id: `recent-${item.id}`,
+        parentId: 'recent-submenu',
         title: title,
         contexts: ['editable']
       });
@@ -1085,6 +1111,17 @@ const handleContextMenuClick = async (info, tab) => {
     } else if (info.menuItemId.startsWith('favorite-')) {
       const itemId = info.menuItemId.replace('favorite-', '');
       const item = clipboardData.favorites.find(item => item.id === itemId);
+      
+      if (item) {
+        // Send paste command to content script
+        chrome.tabs.sendMessage(tab.id, {
+          action: 'pasteContent',
+          content: item.content
+        });
+      }
+    } else if (info.menuItemId.startsWith('recent-')) {
+      const itemId = info.menuItemId.replace('recent-', '');
+      const item = clipboardData.items.find(item => item.id === itemId);
       
       if (item) {
         // Send paste command to content script
@@ -1201,20 +1238,8 @@ const saveClipboardData = async () => {
       }))
     };
     
-    // Log persistence attempt for debugging
-    console.log(`Attempting to save ${dataToSave.items.length} clipboard items to persistent storage`);
-    
-    // Save to persistent storage
+    // Save to storage
     await chrome.storage.local.set({ clipboardData: dataToSave });
-    
-    // For critical operations, create a synchronous backup to session storage
-    // which is faster but will be lost on browser close
-    try {
-      await chrome.storage.session.set({ clipboardData_backup: dataToSave });
-    } catch (sessionError) {
-      console.warn('Session storage backup failed:', sessionError);
-      // Non-critical, continue
-    }
     
     // Verify data was saved by reading it back
     const savedData = await chrome.storage.local.get('clipboardData');
@@ -1247,11 +1272,11 @@ const loadClipboardData = async () => {
   try {
     console.log('Background: Loading clipboard data and settings...');
     
-    // Load the clipboard data from the persistent storage
+    // Load the clipboard data
     const result = await chrome.storage.local.get('clipboardData');
     
     // Initialize if not found
-    if (!result.clipboardData || !result.clipboardData.items || !Array.isArray(result.clipboardData.items)) {
+    if (!result.clipboardData) {
       clipboardData = {
         items: [],
         favorites: []
@@ -1260,21 +1285,6 @@ const loadClipboardData = async () => {
     } else {
       clipboardData = result.clipboardData;
       console.log('Background: Loaded clipboard data, items:', clipboardData.items.length);
-      
-      // Sanitize data to ensure all properties are present
-      clipboardData.items = clipboardData.items.map(item => ({
-        id: item.id || generateId(),
-        content: item.content || '',
-        type: item.type || 'text',
-        timestamp: item.timestamp || Date.now(),
-        isFavorite: !!item.isFavorite,
-        charCount: item.charCount || (item.content ? item.content.length : 0)
-      }));
-      
-      // Ensure favorites array is properly initialized
-      if (!clipboardData.favorites || !Array.isArray(clipboardData.favorites)) {
-        clipboardData.favorites = clipboardData.items.filter(item => item.isFavorite);
-      }
     }
     
     // Load settings
@@ -1340,6 +1350,9 @@ const handleToggleFavorite = async (itemId) => {
       // Save changes
       await saveClipboardData();
       
+      // Refresh context menus to reflect the latest favorites
+      setupContextMenus();
+      
       return true;
     }
     
@@ -1364,6 +1377,9 @@ const handleDeleteItem = async (itemId) => {
     
     // Save changes
     await saveClipboardData();
+    
+    // Refresh context menus to reflect the changes
+    setupContextMenus();
     
     return true;
   } catch (error) {
@@ -1405,6 +1421,9 @@ const handleAddNewItem = async (item) => {
     // Save changes
     await saveClipboardData();
     
+    // Refresh context menus to include the new item
+    setupContextMenus();
+    
     return newItem;
   } catch (error) {
     console.error('Error adding new item:', error);
@@ -1425,6 +1444,9 @@ const handleClearAll = async () => {
     
     // Save changes
     await saveClipboardData();
+    
+    // Refresh context menus to reflect empty state
+    setupContextMenus();
     
     return true;
   } catch (error) {
@@ -1463,6 +1485,9 @@ const handleMoveItemToTop = async (itemId) => {
     
     // Save changes
     await saveClipboardData();
+    
+    // Refresh context menus to reflect the reordered items
+    setupContextMenus();
     
     // Notify any open UI
     chrome.runtime.sendMessage({ action: 'clipboardDataUpdated' });
@@ -1515,6 +1540,9 @@ const handleDeleteMultipleItems = async (itemIds) => {
     
     // Save changes
     await saveClipboardData();
+    
+    // Refresh context menus to reflect deleted items
+    setupContextMenus();
     
     // Notify UI of changes
     chrome.runtime.sendMessage({ action: 'clipboardDataUpdated' });
@@ -1721,6 +1749,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             console.log('Background: Settings saved to storage');
           });
           
+          // Refresh context menus after settings update
+          setupContextMenus();
+          
           // Broadcast the updated settings to all UI instances
           chrome.runtime.sendMessage({
             action: 'settingsUpdated',
@@ -1785,11 +1816,11 @@ const logVerbose = (...args) => {
   }
 };
 
+// Initialize extension when installed or updated
+chrome.runtime.onInstalled.addListener(initialize);
+
 // Handle extension startup
 chrome.runtime.onStartup.addListener(initialize);
-
-// Also initialize on install/update to ensure clipboard monitoring starts immediately
-chrome.runtime.onInstalled.addListener(initialize);
 
 // Handle extension shutdown
 chrome.runtime.onSuspend.addListener(() => {

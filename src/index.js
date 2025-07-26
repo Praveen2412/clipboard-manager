@@ -16,21 +16,28 @@ import SettingsProvider, { SettingsContext } from './contexts/SettingsContext';
  */
 const NotificationToast = ({ notification, onClose }) => {
   useEffect(() => {
+    // Use longer display time for warnings and errors (6 seconds)
+    // Keep success notifications at 3 seconds
+    const displayTime = notification && 
+                       (notification.type === 'error' || notification.type === 'warning') 
+                        ? 6000  // 6 seconds for errors and warnings
+                        : 3000; // 3 seconds for success and other notifications
+    
     const timer = setTimeout(() => {
       if (onClose) {
         onClose();
       }
-    }, 3000);
+    }, displayTime);
     
     return () => {
       clearTimeout(timer);
     };
-  }, [onClose]);
+  }, [onClose, notification]);
   
   if (!notification) return null;
   
   return (
-    <div className={`notification ${notification.type || 'info'}`}>
+    <div className={`notification ${notification.type || 'info'}`} data-duration={notification.type === 'error' || notification.type === 'warning' ? 'long' : 'normal'}>
       {notification.message}
     </div>
   );

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PasteKeeper : Clipboard Manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A productivity tool to efficiently manage your clipboard history.",
   "icons": {
     "16": "icons/icon16.png",
